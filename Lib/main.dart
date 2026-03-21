@@ -4,13 +4,13 @@ import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
 import 'package:intl/intl.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:google_generative_ai/google_generative_ai.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/timezone.dart' as tz;
 import 'package:timezone/data/latest.dart' as tz_data;
 import 'dart:io';
 
-// ── COLORS ───────────────────────────────────────────────────────────────────
+// COLORS
 const kBg      = Color(0xFF0F1117);
 const kSurface = Color(0xFF1A1D27);
 const kCard    = Color(0xFF22263A);
@@ -23,7 +23,7 @@ const kText1   = Color(0xFFF4F4F5);
 const kText2   = Color(0xFF8B8FA8);
 const kText3   = Color(0xFF4A4E6A);
 
-// ── FOOD MODEL ───────────────────────────────────────────────────────────────
+// FOOD MODEL
 class FoodItem {
   final int?     id;
   final String   name;
@@ -121,7 +121,7 @@ Future<int>  saveItem(FoodItem item)   async => (await getDb()).insert('items', 
 Future<void> updateItem(FoodItem item) async => (await getDb()).update('items', item.toMap(), where: 'id=?', whereArgs: [item.id]);
 Future<void> deleteItem(int id)        async => (await getDb()).delete('items', where: 'id=?', whereArgs: [id]);
 
-// ── NOTIFICATIONS ────────────────────────────────────────────────────────────
+// NOTIFICATIONS
 final _notifs = FlutterLocalNotificationsPlugin();
 
 Future<void> initNotifs() async {
@@ -171,36 +171,35 @@ Future<void> cancelNotifs(int id) async {
 
 // ── OCR ──────────────────────────────────────────────────────────────────────
 Future<DateTime?> scanExpiryDate(String imagePath) async {
-  final recognizer = TextRecognizer();
   try {
-    final result = await recognizer.processImage(InputImage.fromFilePath(imagePath));
-    final text   = result.text.toUpperCase();
+    final model = GenerativeModel(
+      model: 'gemini-3-flash-preview',
+      apiKey: 'Insert API KEY HERE', 
+    );
 
-    final patterns = [
-      RegExp(r'(?:BEST BY|EXP(?:IRY)?(?:\s*DATE)?|USE BY|BB|BBE)[:\s]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})', caseSensitive: false),
-      RegExp(r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})'),
-      RegExp(r'(\d{1,2}\s+(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\w*\s+\d{2,4})', caseSensitive: false),
-    ];
+    final imageBytes = await File(imagePath).readAsBytes();
+    final prompt = TextPart(
+      'Look at this food product image. Find the expiry date, best before date, '
+          'or use by date. Reply with ONLY the date in YYYY-MM-DD format. '
+          'If you cannot find a date reply with the word null.',
+    );
+    final imagePart = DataPart('image/jpeg', imageBytes);
 
-    for (final pattern in patterns) {
-      final match = pattern.firstMatch(text);
-      if (match == null) continue;
-      final dateStr = (match.group(1) ?? match.group(0)!).trim();
-      for (final fmt in ['dd/MM/yyyy','MM/dd/yyyy','dd-MM-yyyy','dd.MM.yyyy','dd/MM/yy','dd MMM yyyy','MMM dd yyyy']) {
-        try {
-          final d = DateFormat(fmt).parseStrict(dateStr);
-          final year = d.year < 100 ? d.year + 2000 : d.year;
-          if (year >= 2020 && year <= 2040) return DateTime(year, d.month, d.day);
-        } catch (_) {}
-      }
-    }
-  } finally {
-    recognizer.close();
+    final response = await model.generateContent([
+      Content.multi([prompt, imagePart])
+    ]);
+
+    final text = response.text?.trim();
+    if (text == null || text.toLowerCase() == 'null') return null;
+
+    return DateTime.tryParse(text);
+
+  } catch (e) {
+    debugPrint('Gemini error: $e');
+    return null;
   }
-  return null;
 }
-
-// ── MAIN ─────────────────────────────────────────────────────────────────────
+// MAIN
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await initNotifs();
@@ -216,7 +215,7 @@ void main() async {
   ));
 }
 
-// ── HOME SCREEN ───────────────────────────────────────────────────────────────
+// HOME SCREEN
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
   @override
@@ -225,16 +224,44 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   List<FoodItem> items = [];
+  List<FoodItem> filtered = [];
   bool loading = true;
+  final _searchCtrl = TextEditingController();
 
   @override
   void initState() { super.initState(); refresh(); }
 
+  @override
+  void dispose() {
+    _searchCtrl.dispose();
+    super.dispose();
+  }
+
+// Refresh
   Future<void> refresh() async {
     setState(() => loading = true);
     final all = await loadItems();
     all.sort((a, b) => a.daysLeft.compareTo(b.daysLeft));
-    setState(() { items = all; loading = false; });
+    setState(() {
+      items = all;
+      filtered = all;
+      loading = false;
+    });
+  }
+
+  // more methods
+
+  void _onSearch(String query) {
+    final q = query.toLowerCase().trim();
+    setState(() {
+      filtered = q.isEmpty
+          ? items
+          : items.where((i) =>
+      i.name.toLowerCase().contains(q) ||
+          i.category.toLowerCase().contains(q) ||
+          i.badge.toLowerCase().contains(q),
+      ).toList();
+    });
   }
 
   Future<void> goAdd([FoodItem? existing]) async {
@@ -319,25 +346,67 @@ class _HomeScreenState extends State<HomeScreen> {
             _stat('${items.where((i) => i.daysLeft > 7).length}',                                          'Fresh',     kGreen),
           ]),
         ),
-
+        // ── Search bar
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 4),
+          child: TextField(
+            controller: _searchCtrl,
+            onChanged: _onSearch,
+            style: const TextStyle(color: kText1),
+            decoration: InputDecoration(
+              filled: true,
+              fillColor: kSurface,
+              hintText: 'Search food or category...',
+              hintStyle: const TextStyle(color: kText3),
+              prefixIcon: const Icon(Icons.search_rounded, color: kText2, size: 20),
+              suffixIcon: _searchCtrl.text.isNotEmpty
+                  ? IconButton(
+                icon: const Icon(Icons.close_rounded, color: kText2, size: 18),
+                onPressed: () {
+                  _searchCtrl.clear();
+                  _onSearch('');
+                },
+              )
+                  : null,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide.none,
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: const BorderSide(color: kGreen, width: 1.5),
+              ),
+              contentPadding: const EdgeInsets.symmetric(vertical: 12),
+            ),
+          ),
+        ),
         // List
         Expanded(
           child: loading
               ? const Center(child: CircularProgressIndicator(color: kGreen))
-              : items.isEmpty
-              ? const Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-            Text('🛒', style: TextStyle(fontSize: 56)),
-            SizedBox(height: 12),
-            Text('Nothing tracked yet', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: kText1)),
-            SizedBox(height: 6),
-            Text('Tap + to add your first item', style: TextStyle(color: kText2)),
+              : filtered.isEmpty
+              ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Text(
+              _searchCtrl.text.isNotEmpty ? '🔍' : '🛒',
+              style: const TextStyle(fontSize: 56),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              _searchCtrl.text.isNotEmpty ? 'No results found' : 'Nothing tracked yet',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: kText1),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              _searchCtrl.text.isNotEmpty ? 'Try a different name or category' : 'Tap + to add your first item',
+              style: const TextStyle(color: kText2),
+            ),
           ]))
               : RefreshIndicator(
             color: kGreen, backgroundColor: kCard, onRefresh: refresh,
             child: ListView.builder(
               padding: const EdgeInsets.only(top: 12, bottom: 100),
-              itemCount: items.length,
-              itemBuilder: (_, i) => _FoodCard(item: items[i], onEdit: () => goAdd(items[i]), onDelete: () => remove(items[i])),
+              itemCount: filtered.length,
+              itemBuilder: (_, i) => _FoodCard(item: filtered[i], onEdit: () => goAdd(filtered[i]), onDelete: () => remove(filtered[i])),
             ),
           ),
         ),
@@ -368,7 +437,7 @@ class _HomeScreenState extends State<HomeScreen> {
   );
 }
 
-// ── FOOD CARD ─────────────────────────────────────────────────────────────────
+// FOOD CARD
 class _FoodCard extends StatelessWidget {
   final FoodItem    item;
   final VoidCallback onEdit;
@@ -474,7 +543,14 @@ class _AddScreenState extends State<AddScreen> {
     final picked = await _picker.pickImage(source: src, imageQuality: 85, maxWidth: 1600);
     if (picked == null) return;
     setState(() { _imagePath = picked.path; _scanning = true; });
-    final date = await scanExpiryDate(picked.path);
+
+    DateTime? date;
+    try {
+      date = await scanExpiryDate(picked.path);
+    } catch (e) {
+      debugPrint('Scan failed: $e');
+    }
+
     setState(() { _scanning = false; if (date != null) _date = date; });
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -687,6 +763,10 @@ class _AddScreenState extends State<AddScreen> {
         Icon(icon, color: color, size: 26),
         const SizedBox(height: 5),
         Text(label, style: TextStyle(color: color, fontWeight: FontWeight.w600, fontSize: 13)),
+      ]),
+    ),
+  );
+}
       ]),
     ),
   );
