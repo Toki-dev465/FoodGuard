@@ -17,4 +17,4 @@ Install dependencies:
 flutter pub get
 
 Run the app:
-flutter run in android studios
+flutter run in Android studios
